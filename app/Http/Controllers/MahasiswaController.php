@@ -252,6 +252,11 @@ class MahasiswaController extends Controller
         ]);
 
         $file = $request->file('file_csv');
+        
+        // Deteksi delimiter secara otomatis (koma atau titik koma)
+        $firstLine = fgets(fopen($file->getPathname(), "r"));
+        $delimiter = (substr_count($firstLine, ';') > substr_count($firstLine, ',')) ? ';' : ',';
+        
         $handle = fopen($file->getPathname(), "r");
         
         $header = true;
@@ -260,9 +265,15 @@ class MahasiswaController extends Controller
         $errors = [];
         $rowNum = 1;
 
-        while ($csvLine = fgetcsv($handle, 1000, ",")) {
+        while ($csvLine = fgetcsv($handle, 1000, $delimiter)) {
             if ($header) {
                 $header = false;
+                $rowNum++;
+                continue;
+            }
+
+            // Skip jika baris kosong (sering terjadi di akhir file CSV hasil Excel)
+            if (empty(array_filter($csvLine))) {
                 $rowNum++;
                 continue;
             }
@@ -279,10 +290,35 @@ class MahasiswaController extends Controller
             $nama = trim($csvLine[1]);
             $email = trim($csvLine[2]);
             $jk = trim($csvLine[3]) == 'Perempuan' || trim($csvLine[3]) == 'P' ? 'P' : 'L';
-            $tgl_lahir = trim($csvLine[4]);
+            
+            // Konversi tanggal lahir ke format Y-m-d yang dipahami MySQL
+            $tgl_lahir_raw = trim($csvLine[4]);
+            $tgl_lahir = null;
+            if (!empty($tgl_lahir_raw)) {
+                $parsedDate = null;
+                // Coba parsing format d/m/Y (e.g., 21/03/2026)
+                $dateObj = \DateTime::createFromFormat('d/m/Y', $tgl_lahir_raw);
+                if ($dateObj && $dateObj->format('d/m/Y') === $tgl_lahir_raw) {
+                    $parsedDate = $dateObj->format('Y-m-d');
+                } else {
+                    // Coba parsing format Y-m-d
+                    $dateObj = \DateTime::createFromFormat('Y-m-d', $tgl_lahir_raw);
+                    if ($dateObj && $dateObj->format('Y-m-d') === $tgl_lahir_raw) {
+                        $parsedDate = $dateObj->format('Y-m-d');
+                    } else {
+                        // Jika gagal, coba convert menggunakan strtotime
+                        $timestamp = strtotime(str_replace('/', '-', $tgl_lahir_raw));
+                        if ($timestamp) {
+                            $parsedDate = date('Y-m-d', $timestamp);
+                        }
+                    }
+                }
+                $tgl_lahir = $parsedDate;
+            }
+            
             $prodi = trim($csvLine[5]);
             $angkatan = trim($csvLine[6]);
-            $ipk = trim($csvLine[7]);
+            $ipk = str_replace(',', '.', trim($csvLine[7]));
             $status = strtolower(trim($csvLine[8]));
 
             // Validasi manual
@@ -317,7 +353,7 @@ class MahasiswaController extends Controller
                     'nama' => $nama,
                     'email' => $email,
                     'jenis_kelamin' => $jk,
-                    'tanggal_lahir' => $tgl_lahir ?: null,
+                    'tanggal_lahir' => $tgl_lahir,
                     'prodi' => $prodi,
                     'angkatan' => $angkatan,
                     'ipk' => $ipk ?: 0,
@@ -326,7 +362,7 @@ class MahasiswaController extends Controller
                 $successCount++;
             } catch (\Exception $e) {
                 $failCount++;
-                $errors[] = "Baris $rowNum: Gagal menyimpan data.";
+                $errors[] = "Baris $rowNum: Gagal menyimpan data (" . $e->getMessage() . ").";
             }
 
             $rowNum++;
