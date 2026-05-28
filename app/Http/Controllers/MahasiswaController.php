@@ -3,8 +3,9 @@
 namespace App\Http\Controllers;
 
 use App\Models\Mahasiswa;
+use App\Models\DBLogActivities;
 use Illuminate\Http\Request;
-
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 
 class MahasiswaController extends Controller
@@ -50,12 +51,12 @@ class MahasiswaController extends Controller
         $totalMahasiswa = \App\Models\Mahasiswa::count();
         $mahasiswaAktif = \App\Models\Mahasiswa::where('status', 'aktif')->count();
         $rataIpk = \App\Models\Mahasiswa::avg('ipk') ?? 0;
-        
+
         // Data untuk grafik pie (jumlah mahasiswa per prodi)
         $statistikProdi = \App\Models\Mahasiswa::selectRaw('prodi, count(*) as jumlah')
-                            ->groupBy('prodi')
-                            ->pluck('jumlah', 'prodi')
-                            ->toArray();
+            ->groupBy('prodi')
+            ->pluck('jumlah', 'prodi')
+            ->toArray();
 
         return view('mahasiswa.index', compact('mahasiswa', 'totalMahasiswa', 'mahasiswaAktif', 'rataIpk', 'statistikProdi'));
     }
@@ -143,16 +144,38 @@ class MahasiswaController extends Controller
             'ipk' => 'nullable|numeric|min:0|max:4',
             'status' => 'required|in:aktif,cuti,lulus,do',
         ]);
-        // Upload foto baru (jika ada)
+        // // Upload foto baru (jika ada)
+        // if ($request->hasFile('foto')) {
+        //     // Hapus foto lama
+        //     if ($mahasiswa->foto) {
+        //         Storage::disk('public')->delete($mahasiswa->foto);
+        //     }
+        //     $path = $request->file('foto')->store('mahasiswa', 'public');
+        //     $validated['foto'] = $path;
+        // }
+        // $mahasiswa->update($validated);
+
+        $oldPhoto = $mahasiswa->foto;
+        $newPhoto = null;
+        // 1. Memeriksa apakah ada file foto yang diunggah oleh user
         if ($request->hasFile('foto')) {
-            // Hapus foto lama
-            if ($mahasiswa->foto) {
-                Storage::disk('public')->delete($mahasiswa->foto);
-            }
-            $path = $request->file('foto')->store('mahasiswa', 'public');
-            $validated['foto'] = $path;
+            $newPhoto = $request->file('foto')->store('mahasiswa', 'public');
+            $validated['foto'] = $newPhoto;
         }
-        $mahasiswa->update($validated);
+        // 2. Menjalankan proses update
+        DB::transaction(function () use ($validated, $mahasiswa) {
+            $oldNama = $mahasiswa->nama;
+            $mahasiswa->update($validated);
+            DBLogActivities::create([
+                DBLogActivities::ACTION_COLUMN => DBLogActivities::UPDATE,
+                DBLogActivities::DESC_COLUMN => "Update mahasiswa: {$oldNama} menjadi {$validated['nama']}",
+            ]);
+        });
+        // 3. Cleanup file foto lama
+        if ($newPhoto && $newPhoto) {
+            Storage::disk('public')->delete($oldPhoto);
+        }
+
         return redirect()
             ->route('mahasiswa.index')
             ->with('success', 'Data mahasiswa berhasil diperbarui.');
@@ -164,10 +187,21 @@ class MahasiswaController extends Controller
     public function destroy(Mahasiswa $mahasiswa)
     {
         // Hapus foto dari storage (jika ada)
-        if ($mahasiswa->foto) {
-            Storage::disk('public')->delete($mahasiswa->foto);
+        $fotoPath = $mahasiswa->foto;
+        $nama = $mahasiswa->nama;
+        // menjalankan proses delete data mahasiswa
+        DB::transaction(function () use ($mahasiswa, $nama) {
+            $mahasiswa->delete();
+
+            DBLogActivities::create([
+                DBLogActivities::ACTION_COLUMN => DBLogActivities::DELETE,
+                DBLogActivities::DESC_COLUMN => "Hapus mahasiswa: {$nama}"
+            ]);
+        });
+        // menjalankan proses delete file foto
+        if ($fotoPath) {
+            Storage::disk('public')->delete($fotoPath);
         }
-        $mahasiswa->delete();
         return redirect()
             ->route('mahasiswa.index')
             ->with('success', 'Data mahasiswa berhasil dihapus.');
@@ -214,12 +248,12 @@ class MahasiswaController extends Controller
             "Expires"             => "0"
         );
 
-        $callback = function() use($mahasiswa) {
+        $callback = function () use ($mahasiswa) {
             $file = fopen('php://output', 'w');
-            
+
             // Tambahkan BOM agar file terbaca sebagai UTF-8 dengan benar di Excel
-            fprintf($file, chr(0xEF).chr(0xBB).chr(0xBF));
-            
+            fprintf($file, chr(0xEF) . chr(0xBB) . chr(0xBF));
+
             fputcsv($file, array('NIM', 'Nama', 'Email', 'Jenis Kelamin', 'Tanggal Lahir', 'Prodi', 'Angkatan', 'IPK', 'Status'), ';');
 
             foreach ($mahasiswa as $row) {
@@ -252,13 +286,13 @@ class MahasiswaController extends Controller
         ]);
 
         $file = $request->file('file_csv');
-        
+
         // Deteksi delimiter secara otomatis (koma atau titik koma)
         $firstLine = fgets(fopen($file->getPathname(), "r"));
         $delimiter = (substr_count($firstLine, ';') > substr_count($firstLine, ',')) ? ';' : ',';
-        
+
         $handle = fopen($file->getPathname(), "r");
-        
+
         $header = true;
         $successCount = 0;
         $failCount = 0;
@@ -290,7 +324,7 @@ class MahasiswaController extends Controller
             $nama = trim($csvLine[1]);
             $email = trim($csvLine[2]);
             $jk = trim($csvLine[3]) == 'Perempuan' || trim($csvLine[3]) == 'P' ? 'P' : 'L';
-            
+
             // Konversi tanggal lahir ke format Y-m-d yang dipahami MySQL
             $tgl_lahir_raw = trim($csvLine[4]);
             $tgl_lahir = null;
@@ -315,7 +349,7 @@ class MahasiswaController extends Controller
                 }
                 $tgl_lahir = $parsedDate;
             }
-            
+
             $prodi = trim($csvLine[5]);
             $angkatan = trim($csvLine[6]);
             $ipk = str_replace(',', '.', trim($csvLine[7]));
